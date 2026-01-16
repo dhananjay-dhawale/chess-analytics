@@ -20,6 +20,7 @@ export interface Account {
   label: string | null;
   gameCount: number;
   createdAt: string;
+  lastSyncAt: string | null;
 }
 
 /** Request to create an account */
@@ -51,6 +52,8 @@ export interface UploadJob {
   totalGames: number | null;
   processedGames: number | null;
   duplicateGames: number | null;
+  archivesProcessed: number | null;
+  totalArchives: number | null;
   errorMessage: string | null;
   createdAt: string;
   completedAt: string | null;

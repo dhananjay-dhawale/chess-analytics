@@ -6,9 +6,12 @@ import com.chessanalytics.model.Platform;
 import com.chessanalytics.model.UploadJob;
 import com.chessanalytics.parser.ParsedGame;
 import com.chessanalytics.parser.PgnParser;
+import com.chessanalytics.repository.AccountRepository;
 import com.chessanalytics.repository.UploadJobRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -21,6 +24,8 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.List;
 
 /**
@@ -57,17 +62,25 @@ public class LichessApiService {
     private final PgnParser pgnParser;
     private final IngestionService ingestionService;
     private final UploadJobRepository uploadJobRepository;
+    private final AccountRepository accountRepository;
+
+    // Self-injection for @Async to work (Spring proxy requirement)
+    @Autowired
+    @Lazy
+    private LichessApiService self;
 
     public LichessApiService(
             PgnParser pgnParser,
             IngestionService ingestionService,
-            UploadJobRepository uploadJobRepository) {
+            UploadJobRepository uploadJobRepository,
+            AccountRepository accountRepository) {
         this.httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(30))
             .build();
         this.pgnParser = pgnParser;
         this.ingestionService = ingestionService;
         this.uploadJobRepository = uploadJobRepository;
+        this.accountRepository = accountRepository;
     }
 
     /**
@@ -89,8 +102,8 @@ public class LichessApiService {
         job.setStatus(JobStatus.PENDING);
         job = uploadJobRepository.save(job);
 
-        // Start async processing
-        importGamesAsync(job.getId(), account);
+        // Start async processing (use self-injection so @Async works through Spring proxy)
+        self.importGamesAsync(job.getId(), account);
 
         return job;
     }
@@ -109,10 +122,12 @@ public class LichessApiService {
     /**
      * Async method that fetches games from Lichess API.
      * Uses streaming to process games one at a time for memory efficiency.
+     * Supports incremental sync using the 'since' parameter.
      */
     @Async
     public void importGamesAsync(Long jobId, Account account) {
         log.info("Starting Lichess API import for job {} (account: {})", jobId, account.getUsername());
+        LocalDateTime syncStartTime = LocalDateTime.now();
 
         try {
             // Update job to processing
@@ -120,19 +135,30 @@ public class LichessApiService {
 
             // Build URL with parameters for PGN format
             // The endpoint streams PGN games separated by blank lines
-            String url = LICHESS_API_BASE + account.getUsername().toLowerCase()
-                + "?moves=true"
-                + "&tags=true"
-                + "&clocks=false"  // Skip clock data for faster processing
-                + "&evals=false"   // Skip evaluations for faster processing
-                + "&opening=true"; // Include opening names
+            StringBuilder urlBuilder = new StringBuilder(LICHESS_API_BASE)
+                .append(account.getUsername().toLowerCase())
+                .append("?moves=true")
+                .append("&tags=true")
+                .append("&clocks=false")  // Skip clock data for faster processing
+                .append("&evals=false")   // Skip evaluations for faster processing
+                .append("&opening=true"); // Include opening names
 
+            // Add 'since' parameter for incremental sync
+            LocalDateTime lastSyncAt = account.getLastSyncAt();
+            if (lastSyncAt != null) {
+                // Lichess uses Unix timestamp in milliseconds
+                long sinceTimestamp = lastSyncAt.toInstant(ZoneOffset.UTC).toEpochMilli();
+                urlBuilder.append("&since=").append(sinceTimestamp);
+                log.info("Job {}: Incremental sync since {} (timestamp: {})", jobId, lastSyncAt, sinceTimestamp);
+            }
+
+            String url = urlBuilder.toString();
             log.info("Job {}: Fetching games from {}", jobId, url);
 
             int gamesProcessed = fetchAndProcessGames(url, account, jobId);
 
-            // Mark completed
-            markJobCompleted(jobId);
+            // Mark completed and update lastSyncAt
+            markJobCompleted(jobId, account.getId(), syncStartTime);
             log.info("Job {} completed: {} games processed", jobId, gamesProcessed);
 
         } catch (Exception e) {
@@ -308,10 +334,15 @@ public class LichessApiService {
     }
 
     @Transactional
-    void markJobCompleted(Long jobId) {
+    void markJobCompleted(Long jobId, Long accountId, LocalDateTime syncTime) {
         uploadJobRepository.findById(jobId).ifPresent(job -> {
             job.markCompleted();
             uploadJobRepository.save(job);
+        });
+        // Update account's lastSyncAt
+        accountRepository.findById(accountId).ifPresent(account -> {
+            account.setLastSyncAt(syncTime);
+            accountRepository.save(account);
         });
     }
 

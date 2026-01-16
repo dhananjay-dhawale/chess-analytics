@@ -35,6 +35,12 @@ public class UploadJob {
     @Column(name = "duplicate_games")
     private Integer duplicateGames;
 
+    @Column(name = "archives_processed")
+    private Integer archivesProcessed;
+
+    @Column(name = "total_archives")
+    private Integer totalArchives;
+
     @Column(name = "error_message", length = 1000)
     private String errorMessage;
 
@@ -168,5 +174,21 @@ public class UploadJob {
      */
     public void incrementDuplicate() {
         this.duplicateGames = (this.duplicateGames == null ? 0 : this.duplicateGames) + 1;
+    }
+
+    public Integer getArchivesProcessed() {
+        return archivesProcessed;
+    }
+
+    public void setArchivesProcessed(Integer archivesProcessed) {
+        this.archivesProcessed = archivesProcessed;
+    }
+
+    public Integer getTotalArchives() {
+        return totalArchives;
+    }
+
+    public void setTotalArchives(Integer totalArchives) {
+        this.totalArchives = totalArchives;
     }
 }

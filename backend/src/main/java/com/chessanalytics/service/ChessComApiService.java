@@ -11,17 +11,25 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+
+import com.chessanalytics.repository.AccountRepository;
 
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.time.LocalDateTime;
+import java.time.YearMonth;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Fetches games from Chess.com public API and imports them.
@@ -56,16 +64,26 @@ public class ChessComApiService {
     private static final long MAX_BACKOFF_MS = 60000;
     private static final int MAX_RETRIES = 3;
 
+    // Pattern to extract year/month from archive URL
+    private static final Pattern ARCHIVE_URL_PATTERN = Pattern.compile(".*/games/(\\d{4})/(\\d{2})$");
+
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
     private final PgnParser pgnParser;
     private final IngestionService ingestionService;
     private final UploadJobRepository uploadJobRepository;
+    private final AccountRepository accountRepository;
+
+    // Self-injection for @Async to work (Spring proxy requirement)
+    @Autowired
+    @Lazy
+    private ChessComApiService self;
 
     public ChessComApiService(
             PgnParser pgnParser,
             IngestionService ingestionService,
-            UploadJobRepository uploadJobRepository) {
+            UploadJobRepository uploadJobRepository,
+            AccountRepository accountRepository) {
         this.httpClient = HttpClient.newBuilder()
             .connectTimeout(REQUEST_TIMEOUT)
             .build();
@@ -73,6 +91,7 @@ public class ChessComApiService {
         this.pgnParser = pgnParser;
         this.ingestionService = ingestionService;
         this.uploadJobRepository = uploadJobRepository;
+        this.accountRepository = accountRepository;
     }
 
     /**
@@ -94,8 +113,8 @@ public class ChessComApiService {
         job.setStatus(JobStatus.PENDING);
         job = uploadJobRepository.save(job);
 
-        // Start async processing
-        importGamesAsync(job.getId(), account);
+        // Start async processing (use self-injection so @Async works through Spring proxy)
+        self.importGamesAsync(job.getId(), account);
 
         return job;
     }
@@ -114,27 +133,39 @@ public class ChessComApiService {
     /**
      * Async method that fetches games from Chess.com API.
      * Processes archives sequentially with rate limiting.
+     * Supports incremental sync by filtering archives based on lastSyncAt.
      */
     @Async
     public void importGamesAsync(Long jobId, Account account) {
         log.info("Starting Chess.com API import for job {} (account: {})", jobId, account.getUsername());
+        LocalDateTime syncStartTime = LocalDateTime.now();
 
         try {
             // Step 1: Fetch archive list
-            List<String> archives = fetchArchiveList(account.getUsername());
-            if (archives.isEmpty()) {
+            List<String> allArchives = fetchArchiveList(account.getUsername());
+            if (allArchives.isEmpty()) {
                 log.info("No game archives found for user: {}", account.getUsername());
-                markJobCompleted(jobId);
+                markJobCompleted(jobId, account.getId(), syncStartTime);
                 return;
             }
 
-            log.info("Job {}: Found {} monthly archives to process", jobId, archives.size());
+            // Step 2: Filter archives based on lastSyncAt for incremental sync
+            LocalDateTime lastSyncAt = account.getLastSyncAt();
+            List<String> archives = filterArchivesByDate(allArchives, lastSyncAt);
 
-            // Step 2: Count total games (estimate from archives)
-            // We'll update this as we process each month
-            updateJobStatus(jobId, JobStatus.PROCESSING, archives.size());
+            if (archives.isEmpty()) {
+                log.info("No new archives to process since last sync: {}", lastSyncAt);
+                markJobCompleted(jobId, account.getId(), syncStartTime);
+                return;
+            }
 
-            // Step 3: Process each archive sequentially
+            log.info("Job {}: Found {} archives to process (filtered from {} total, lastSync: {})",
+                jobId, archives.size(), allArchives.size(), lastSyncAt);
+
+            // Step 3: Initialize job with archive count for discovery phase
+            updateJobStatusWithArchives(jobId, JobStatus.PROCESSING, archives.size());
+
+            // Step 4: Process each archive sequentially
             int totalGamesFound = 0;
             int archivesProcessed = 0;
 
@@ -161,6 +192,7 @@ public class ChessComApiService {
                     }
 
                     archivesProcessed++;
+                    updateArchiveProgress(jobId, archivesProcessed);
                     log.info("Job {}: Processed archive {}/{} ({} games so far)",
                         jobId, archivesProcessed, archives.size(), totalGamesFound);
 
@@ -171,11 +203,13 @@ public class ChessComApiService {
                     // Log error but continue with next archive
                     log.warn("Job {}: Failed to process archive {}: {}",
                         jobId, archiveUrl, e.getMessage());
+                    archivesProcessed++;
+                    updateArchiveProgress(jobId, archivesProcessed);
                 }
             }
 
-            // Mark completed
-            markJobCompleted(jobId);
+            // Mark completed and update lastSyncAt
+            markJobCompleted(jobId, account.getId(), syncStartTime);
             log.info("Job {} completed: {} archives processed, {} total games",
                 jobId, archivesProcessed, totalGamesFound);
 
@@ -183,6 +217,38 @@ public class ChessComApiService {
             log.error("Job {} failed: {}", jobId, e.getMessage(), e);
             markJobFailed(jobId, e.getMessage());
         }
+    }
+
+    /**
+     * Filters archives to only include those from months >= lastSyncAt.
+     * Archive URLs are in format: .../games/YYYY/MM
+     */
+    private List<String> filterArchivesByDate(List<String> archives, LocalDateTime lastSyncAt) {
+        if (lastSyncAt == null) {
+            return archives; // No previous sync, process all
+        }
+
+        YearMonth lastSyncMonth = YearMonth.from(lastSyncAt);
+        List<String> filtered = new ArrayList<>();
+
+        for (String archiveUrl : archives) {
+            Matcher matcher = ARCHIVE_URL_PATTERN.matcher(archiveUrl);
+            if (matcher.find()) {
+                int year = Integer.parseInt(matcher.group(1));
+                int month = Integer.parseInt(matcher.group(2));
+                YearMonth archiveMonth = YearMonth.of(year, month);
+
+                // Include if archive month is >= last sync month
+                if (!archiveMonth.isBefore(lastSyncMonth)) {
+                    filtered.add(archiveUrl);
+                }
+            } else {
+                // Can't parse, include to be safe
+                filtered.add(archiveUrl);
+            }
+        }
+
+        return filtered;
     }
 
     /**
@@ -285,11 +351,11 @@ public class ChessComApiService {
     // Job update helper methods
 
     @Transactional
-    void updateJobStatus(Long jobId, JobStatus status, int totalMonths) {
+    void updateJobStatusWithArchives(Long jobId, JobStatus status, int totalArchives) {
         uploadJobRepository.findById(jobId).ifPresent(job -> {
             job.setStatus(status);
-            // Initially set totalGames to archive count; will be updated as we discover games
-            job.setTotalGames(totalMonths);
+            job.setTotalArchives(totalArchives);
+            job.setArchivesProcessed(0);
             uploadJobRepository.save(job);
         });
     }
@@ -303,10 +369,23 @@ public class ChessComApiService {
     }
 
     @Transactional
-    void markJobCompleted(Long jobId) {
+    void updateArchiveProgress(Long jobId, int archivesProcessed) {
+        uploadJobRepository.findById(jobId).ifPresent(job -> {
+            job.setArchivesProcessed(archivesProcessed);
+            uploadJobRepository.save(job);
+        });
+    }
+
+    @Transactional
+    void markJobCompleted(Long jobId, Long accountId, LocalDateTime syncTime) {
         uploadJobRepository.findById(jobId).ifPresent(job -> {
             job.markCompleted();
             uploadJobRepository.save(job);
+        });
+        // Update account's lastSyncAt
+        accountRepository.findById(accountId).ifPresent(account -> {
+            account.setLastSyncAt(syncTime);
+            accountRepository.save(account);
         });
     }
 

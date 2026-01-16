@@ -11,6 +11,7 @@ public record AccountResponse(
     String username,
     String label,
     LocalDateTime createdAt,
+    LocalDateTime lastSyncAt,
     Long gameCount
 ) {
     public static AccountResponse from(Account account, Long gameCount) {
@@ -21,6 +22,7 @@ public record AccountResponse(
             account.getUsername(),
             account.getLabel(),
             account.getCreatedAt(),
+            account.getLastSyncAt(),
             gameCount
         );
     }

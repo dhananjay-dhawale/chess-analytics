@@ -142,6 +142,31 @@ export function AccountManager({
     .filter(a => selectedAccountIds.includes(a.id))
     .reduce((sum, a) => sum + a.gameCount, 0);
 
+  const formatLastSync = (lastSyncAt: string | null): string => {
+    if (!lastSyncAt) return 'Never synced';
+    const date = new Date(lastSyncAt);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+    if (diffDays === 0) {
+      const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
+      if (diffHours === 0) {
+        const diffMins = Math.floor(diffMs / (1000 * 60));
+        return diffMins <= 1 ? 'Just now' : `${diffMins} minutes ago`;
+      }
+      return diffHours === 1 ? '1 hour ago' : `${diffHours} hours ago`;
+    }
+    if (diffDays === 1) return 'Yesterday';
+    if (diffDays < 7) return `${diffDays} days ago`;
+    return date.toLocaleDateString();
+  };
+
+  const getSyncTooltip = (account: Account): string => {
+    const syncStatus = formatLastSync(account.lastSyncAt);
+    return `Sync games from ${PLATFORM_LABELS[account.platform]}\nLast sync: ${syncStatus}`;
+  };
+
   if (loading && accounts.length === 0) {
     return (
       <section className="card account-manager">
@@ -200,12 +225,12 @@ export function AccountManager({
                 <div className="account-actions">
                   {onImportStarted && (
                     <button
-                      className="import-account-button"
+                      className="sync-account-button"
                       onClick={() => handleImportClick(account)}
                       disabled={importDisabled || importingId === account.id || deletingId === account.id}
-                      title={`Import games from ${PLATFORM_LABELS[account.platform]}`}
+                      title={getSyncTooltip(account)}
                     >
-                      {importingId === account.id ? '...' : '↓'}
+                      {importingId === account.id ? '...' : '\u{1F504}'}
                     </button>
                   )}
                   <button
@@ -255,15 +280,26 @@ export function AccountManager({
       {showImportConfirm && (
         <div className="modal-overlay" onClick={() => setShowImportConfirm(null)}>
           <div className="modal import-confirm-modal" onClick={e => e.stopPropagation()}>
-            <h3>Import from {PLATFORM_LABELS[showImportConfirm.platform]}</h3>
+            <h3>Sync from {PLATFORM_LABELS[showImportConfirm.platform]}</h3>
             <p className="import-account-name">
               {showImportConfirm.username}
               {showImportConfirm.label && ` (${showImportConfirm.label})`}
             </p>
+            <div className="import-info">
+              <p className="last-sync-info">
+                Last synced: <strong>{formatLastSync(showImportConfirm.lastSyncAt)}</strong>
+              </p>
+              {showImportConfirm.lastSyncAt ? (
+                <p>This will fetch only new games since your last sync.</p>
+              ) : (
+                <p>This will fetch your complete game history from {PLATFORM_LABELS[showImportConfirm.platform]}.</p>
+              )}
+            </div>
             <div className="import-warning">
-              <p>This will fetch your complete game history from {PLATFORM_LABELS[showImportConfirm.platform]}.</p>
               <ul>
-                <li>May take several minutes for large accounts</li>
+                {!showImportConfirm.lastSyncAt && (
+                  <li>First sync may take several minutes for large accounts</li>
+                )}
                 <li>Rate-limited to respect {PLATFORM_LABELS[showImportConfirm.platform]} API</li>
                 <li>Duplicate games will be skipped automatically</li>
               </ul>
@@ -279,7 +315,7 @@ export function AccountManager({
                 className="button primary"
                 onClick={handleConfirmImport}
               >
-                Start Import
+                {showImportConfirm.lastSyncAt ? 'Sync New Games' : 'Start Full Sync'}
               </button>
             </div>
           </div>
