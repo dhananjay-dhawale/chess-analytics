@@ -28,8 +28,11 @@ import java.time.LocalDateTime;
 import java.time.YearMonth;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
+import org.springframework.transaction.annotation.Propagation;
 
 /**
  * Fetches games from Chess.com public API and imports them.
@@ -63,6 +66,7 @@ public class ChessComApiService {
     private static final long INITIAL_BACKOFF_MS = 2000;
     private static final long MAX_BACKOFF_MS = 60000;
     private static final int MAX_RETRIES = 3;
+    private static final int PROGRESS_UPDATE_INTERVAL = 100;
 
     // Pattern to extract year/month from archive URL
     private static final Pattern ARCHIVE_URL_PATTERN = Pattern.compile(".*/games/(\\d{4})/(\\d{2})$");
@@ -145,7 +149,7 @@ public class ChessComApiService {
             List<String> allArchives = fetchArchiveList(account.getUsername());
             if (allArchives.isEmpty()) {
                 log.info("No game archives found for user: {}", account.getUsername());
-                markJobCompleted(jobId, account.getId(), syncStartTime);
+                self.markJobCompleted(jobId, account.getId(), syncStartTime);
                 return;
             }
 
@@ -155,7 +159,7 @@ public class ChessComApiService {
 
             if (archives.isEmpty()) {
                 log.info("No new archives to process since last sync: {}", lastSyncAt);
-                markJobCompleted(jobId, account.getId(), syncStartTime);
+                self.markJobCompleted(jobId, account.getId(), syncStartTime);
                 return;
             }
 
@@ -163,11 +167,14 @@ public class ChessComApiService {
                 jobId, archives.size(), allArchives.size(), lastSyncAt);
 
             // Step 3: Initialize job with archive count for discovery phase
-            updateJobStatusWithArchives(jobId, JobStatus.PROCESSING, archives.size());
+            self.updateJobStatusWithArchives(jobId, JobStatus.PROCESSING, archives.size());
 
             // Step 4: Process each archive sequentially
             int totalGamesFound = 0;
             int archivesProcessed = 0;
+            AtomicInteger processedCount = new AtomicInteger(0);
+            AtomicInteger duplicateCount = new AtomicInteger(0);
+            AtomicInteger pendingUpdates = new AtomicInteger(0);
 
             for (String archiveUrl : archives) {
                 try {
@@ -181,18 +188,28 @@ public class ChessComApiService {
 
                     // Update total count as we discover games
                     totalGamesFound += gamePgns.size();
-                    updateJobTotal(jobId, totalGamesFound);
+                    self.updateJobTotal(jobId, totalGamesFound);
 
                     // Process each game
                     for (String pgn : gamePgns) {
                         ParsedGame parsed = pgnParser.parseGameFromPgn(pgn, account.getUsername());
                         if (parsed != null && parsed.isValid()) {
-                            ingestionService.saveGame(account, parsed, jobId);
+                            boolean isDuplicate = ingestionService.saveGameOnly(account, parsed);
+                            processedCount.incrementAndGet();
+                            if (isDuplicate) {
+                                duplicateCount.incrementAndGet();
+                            }
+
+                            // Batch progress updates to reduce DB contention
+                            if (pendingUpdates.incrementAndGet() >= PROGRESS_UPDATE_INTERVAL) {
+                                self.updateJobProgress(jobId, processedCount.get(), duplicateCount.get());
+                                pendingUpdates.set(0);
+                            }
                         }
                     }
 
                     archivesProcessed++;
-                    updateArchiveProgress(jobId, archivesProcessed);
+                    self.updateArchiveProgress(jobId, archivesProcessed);
                     log.info("Job {}: Processed archive {}/{} ({} games so far)",
                         jobId, archivesProcessed, archives.size(), totalGamesFound);
 
@@ -204,18 +221,21 @@ public class ChessComApiService {
                     log.warn("Job {}: Failed to process archive {}: {}",
                         jobId, archiveUrl, e.getMessage());
                     archivesProcessed++;
-                    updateArchiveProgress(jobId, archivesProcessed);
+                    self.updateArchiveProgress(jobId, archivesProcessed);
                 }
             }
 
+            // Final progress update
+            self.updateJobProgress(jobId, processedCount.get(), duplicateCount.get());
+
             // Mark completed and update lastSyncAt
-            markJobCompleted(jobId, account.getId(), syncStartTime);
+            self.markJobCompleted(jobId, account.getId(), syncStartTime);
             log.info("Job {} completed: {} archives processed, {} total games",
                 jobId, archivesProcessed, totalGamesFound);
 
         } catch (Exception e) {
             log.error("Job {} failed: {}", jobId, e.getMessage(), e);
-            markJobFailed(jobId, e.getMessage());
+            self.markJobFailed(jobId, e.getMessage());
         }
     }
 
@@ -350,8 +370,8 @@ public class ChessComApiService {
 
     // Job update helper methods
 
-    @Transactional
-    void updateJobStatusWithArchives(Long jobId, JobStatus status, int totalArchives) {
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void updateJobStatusWithArchives(Long jobId, JobStatus status, int totalArchives) {
         uploadJobRepository.findById(jobId).ifPresent(job -> {
             job.setStatus(status);
             job.setTotalArchives(totalArchives);
@@ -360,24 +380,33 @@ public class ChessComApiService {
         });
     }
 
-    @Transactional
-    void updateJobTotal(Long jobId, int totalGames) {
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void updateJobTotal(Long jobId, int totalGames) {
         uploadJobRepository.findById(jobId).ifPresent(job -> {
             job.setTotalGames(totalGames);
             uploadJobRepository.save(job);
         });
     }
 
-    @Transactional
-    void updateArchiveProgress(Long jobId, int archivesProcessed) {
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void updateJobProgress(Long jobId, int processed, int duplicates) {
+        uploadJobRepository.findById(jobId).ifPresent(job -> {
+            job.setProcessedGames(processed);
+            job.setDuplicateGames(duplicates);
+            uploadJobRepository.save(job);
+        });
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void updateArchiveProgress(Long jobId, int archivesProcessed) {
         uploadJobRepository.findById(jobId).ifPresent(job -> {
             job.setArchivesProcessed(archivesProcessed);
             uploadJobRepository.save(job);
         });
     }
 
-    @Transactional
-    void markJobCompleted(Long jobId, Long accountId, LocalDateTime syncTime) {
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void markJobCompleted(Long jobId, Long accountId, LocalDateTime syncTime) {
         uploadJobRepository.findById(jobId).ifPresent(job -> {
             job.markCompleted();
             uploadJobRepository.save(job);
@@ -389,8 +418,8 @@ public class ChessComApiService {
         });
     }
 
-    @Transactional
-    void markJobFailed(Long jobId, String errorMessage) {
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void markJobFailed(Long jobId, String errorMessage) {
         uploadJobRepository.findById(jobId).ifPresent(job -> {
             job.markFailed(errorMessage);
             uploadJobRepository.save(job);
