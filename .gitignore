@@ -1,0 +1,85 @@
+# ====================
+# Backend (Spring Boot / Maven)
+# ====================
+backend/target/
+backend/*.jar
+backend/*.war
+backend/*.log
+
+# Maven wrapper
+backend/.mvn/wrapper/maven-wrapper.jar
+
+# IDE - IntelliJ
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# IDE - Eclipse
+.classpath
+.project
+.settings/
+
+# ====================
+# Frontend (Node.js / Vite)
+# ====================
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/*.log
+
+# ====================
+# Database
+# ====================
+data/*.db
+data/*.mv.db
+data/*.trace.db
+
+# ====================
+# OS Generated
+# ====================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ====================
+# Environment & Secrets
+# ====================
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# ====================
+# Logs
+# ====================
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ====================
+# Misc
+# ====================
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# ====================
+# Claude Code
+# ====================
+.claude/
+
+# ====================
+# Uploads (runtime generated)
+# ====================
+backend/uploads/
+uploads/
