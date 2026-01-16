@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback } from 'react';
-import type { Account } from '../types';
-import { getAccounts, deleteAccount, startChessComImport, startLichessImport } from '../api/client';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import type { Account, UploadJob } from '../types';
+import { getAccounts, deleteAccount, startChessComImport, startLichessImport, getJobStatus } from '../api/client';
 import { AddAccountModal } from './AddAccountModal';
 import { PLATFORM_LABELS } from '../types';
 
@@ -9,15 +9,19 @@ interface AccountManagerProps {
   onSelectionChange: (accountIds: number[]) => void;
   onAccountsChange: () => void;
   onImportStarted?: (accountId: number, jobId: number) => void;
-  importDisabled?: boolean;
+  activeJob?: { accountId: number; jobId: number } | null;
+  onJobComplete?: () => void;
 }
+
+const POLL_INTERVAL_MS = 1000;
 
 export function AccountManager({
   selectedAccountIds,
   onSelectionChange,
   onAccountsChange,
   onImportStarted,
-  importDisabled = false
+  activeJob,
+  onJobComplete
 }: AccountManagerProps) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [loading, setLoading] = useState(true);
@@ -26,6 +30,8 @@ export function AccountManager({
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [importingId, setImportingId] = useState<number | null>(null);
   const [showImportConfirm, setShowImportConfirm] = useState<Account | null>(null);
+  const [jobStatus, setJobStatus] = useState<UploadJob | null>(null);
+  const pollingRef = useRef<number | null>(null);
 
   const fetchAccounts = useCallback(async () => {
     try {
@@ -49,9 +55,48 @@ export function AccountManager({
     fetchAccounts();
   }, [fetchAccounts]);
 
+  // Poll job status when there's an active job
+  useEffect(() => {
+    if (!activeJob) {
+      setJobStatus(null);
+      return;
+    }
+
+    let isActive = true;
+
+    const poll = async () => {
+      try {
+        const status = await getJobStatus(activeJob.accountId, activeJob.jobId);
+        if (!isActive) return;
+
+        setJobStatus(status);
+
+        if (status.status === 'COMPLETED') {
+          onJobComplete?.();
+          fetchAccounts(); // Refresh to get updated game count
+        } else if (status.status === 'FAILED') {
+          // Keep showing the error
+        } else {
+          pollingRef.current = window.setTimeout(poll, POLL_INTERVAL_MS);
+        }
+      } catch (err) {
+        if (!isActive) return;
+        console.error('Failed to poll job status:', err);
+      }
+    };
+
+    poll();
+
+    return () => {
+      isActive = false;
+      if (pollingRef.current) {
+        clearTimeout(pollingRef.current);
+      }
+    };
+  }, [activeJob, onJobComplete, fetchAccounts]);
+
   const handleToggleAccount = (accountId: number) => {
     if (selectedAccountIds.includes(accountId)) {
-      // Don't allow deselecting all
       if (selectedAccountIds.length > 1) {
         onSelectionChange(selectedAccountIds.filter(id => id !== accountId));
       }
@@ -65,7 +110,6 @@ export function AccountManager({
   };
 
   const handleClearSelection = () => {
-    // Keep at least one selected
     if (accounts.length > 0) {
       onSelectionChange([accounts[0].id]);
     }
@@ -80,10 +124,8 @@ export function AccountManager({
       setDeletingId(accountId);
       await deleteAccount(accountId);
 
-      // Remove from selection if selected
       if (selectedAccountIds.includes(accountId)) {
         const newSelection = selectedAccountIds.filter(id => id !== accountId);
-        // Ensure at least one remains selected if possible
         if (newSelection.length === 0) {
           const remaining = accounts.filter(a => a.id !== accountId);
           if (remaining.length > 0) {
@@ -125,15 +167,14 @@ export function AccountManager({
       setImportingId(account.id);
       setError(null);
 
-      // Call the appropriate import API based on platform
       const job = account.platform === 'CHESS_COM'
         ? await startChessComImport(account.id)
         : await startLichessImport(account.id);
 
+      setImportingId(null);
       onImportStarted(account.id, job.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to start import');
-    } finally {
       setImportingId(null);
     }
   };
@@ -166,6 +207,34 @@ export function AccountManager({
     const syncStatus = formatLastSync(account.lastSyncAt);
     return `Sync games from ${PLATFORM_LABELS[account.platform]}\nLast sync: ${syncStatus}`;
   };
+
+  const getProgressText = (): string => {
+    if (!jobStatus) return 'Starting...';
+    if (jobStatus.status === 'COMPLETED') return 'Done!';
+    if (jobStatus.status === 'FAILED') return 'Failed';
+
+    const isDiscovery = jobStatus.status === 'PENDING' ||
+      (jobStatus.status === 'PROCESSING' && (!jobStatus.totalGames || jobStatus.totalGames === 0));
+
+    if (isDiscovery) {
+      if (jobStatus.totalArchives && jobStatus.totalArchives > 0) {
+        return `${jobStatus.archivesProcessed ?? 0}/${jobStatus.totalArchives} archives`;
+      }
+      return 'Discovering...';
+    }
+
+    const processed = jobStatus.processedGames ?? 0;
+    const total = jobStatus.totalGames ?? 0;
+    const newGames = processed - (jobStatus.duplicateGames ?? 0);
+
+    if (total > 0) {
+      return `${newGames} new games`;
+    }
+    return 'Processing...';
+  };
+
+  const isAccountSyncing = (accountId: number) => activeJob?.accountId === accountId;
+  const importDisabled = activeJob !== null;
 
   if (loading && accounts.length === 0) {
     return (
@@ -202,7 +271,7 @@ export function AccountManager({
             {accounts.map(account => (
               <div
                 key={account.id}
-                className={`account-item ${selectedAccountIds.includes(account.id) ? 'selected' : ''}`}
+                className={`account-item ${selectedAccountIds.includes(account.id) ? 'selected' : ''} ${isAccountSyncing(account.id) ? 'syncing' : ''}`}
               >
                 <label className="account-checkbox">
                   <input
@@ -218,25 +287,49 @@ export function AccountManager({
                       <span className="account-label">({account.label})</span>
                     )}
                   </span>
+                </label>
+
+                {isAccountSyncing(account.id) && jobStatus ? (
+                  <span className={`account-sync-status ${jobStatus.status === 'COMPLETED' ? 'complete' : ''} ${jobStatus.status === 'FAILED' ? 'failed' : ''}`}>
+                    {jobStatus.status !== 'COMPLETED' && jobStatus.status !== 'FAILED' && (
+                      <span className="sync-spinner-small" />
+                    )}
+                    {getProgressText()}
+                  </span>
+                ) : (
                   <span className="account-games">
                     {account.gameCount.toLocaleString()} games
                   </span>
-                </label>
+                )}
+
                 <div className="account-actions">
                   {onImportStarted && (
                     <button
                       className="sync-account-button"
-                      onClick={() => handleImportClick(account)}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleImportClick(account);
+                      }}
                       disabled={importDisabled || importingId === account.id || deletingId === account.id}
                       title={getSyncTooltip(account)}
                     >
-                      {importingId === account.id ? '...' : '\u{1F504}'}
+                      {importingId === account.id ? (
+                        <span className="sync-spinner" />
+                      ) : (
+                        <svg className="sync-icon" viewBox="0 0 16 16" width="16" height="16">
+                          <path fill="currentColor" d="M13.65 2.35a8 8 0 1 0 1.77 8.71.75.75 0 0 0-1.42-.49 6.5 6.5 0 1 1-1.46-7.11L11 5h3.25a.75.75 0 0 0 .75-.75V1l-1.35 1.35z"/>
+                          <path fill="currentColor" d="M2.35 13.65a8 8 0 0 0 12.08-1.71.75.75 0 1 0-1.42-.49A6.5 6.5 0 0 1 3.5 8H5L3.65 6.65 2 8v.25c0 2.07.84 3.95 2.35 5.4z"/>
+                        </svg>
+                      )}
                     </button>
                   )}
                   <button
                     className="delete-account-button"
-                    onClick={() => handleDeleteAccount(account.id)}
-                    disabled={deletingId === account.id}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleDeleteAccount(account.id);
+                    }}
+                    disabled={deletingId === account.id || isAccountSyncing(account.id)}
                     title="Delete account"
                   >
                     {deletingId === account.id ? '...' : '×'}

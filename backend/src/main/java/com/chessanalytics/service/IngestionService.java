@@ -8,9 +8,12 @@ import com.chessanalytics.repository.GameRepository;
 import com.chessanalytics.repository.UploadJobRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -35,6 +38,11 @@ public class IngestionService {
     private final GameRepository gameRepository;
     private final UploadJobRepository uploadJobRepository;
     private final Path uploadDir;
+
+    // Self-injection for @Async and @Transactional to work through Spring proxy
+    @Autowired
+    @Lazy
+    private IngestionService self;
 
     public IngestionService(
             PgnParser pgnParser,
@@ -75,8 +83,8 @@ public class IngestionService {
         job.setStatus(JobStatus.PENDING);
         job = uploadJobRepository.save(job);
 
-        // Start async processing
-        processFileAsync(job.getId(), account, filePath);
+        // Start async processing (use self-injection so @Async works through Spring proxy)
+        self.processFileAsync(job.getId(), account, filePath);
 
         return UploadJobResponse.from(job);
     }
@@ -95,10 +103,10 @@ public class IngestionService {
             updateJobTotal(jobId, totalGames);
             log.info("Job {}: Found {} games to process", jobId, totalGames);
 
-            // Parse and save games
+            // Parse and save games (use self for @Transactional to work through proxy)
             pgnParser.parse(filePath, account.getUsername(), parsedGame -> {
                 try {
-                    saveGame(account, parsedGame, jobId);
+                    self.saveGame(account, parsedGame, jobId);
                 } catch (Exception e) {
                     log.error("Error saving game in job {}: {}", jobId, e.getMessage());
                 }
@@ -116,9 +124,17 @@ public class IngestionService {
 
     /**
      * Saves a parsed game and updates job progress.
+     * Uses REQUIRES_NEW to ensure each game save is in its own transaction,
+     * preventing session corruption if one save fails.
      */
-    @Transactional
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void saveGame(Account account, ParsedGame parsed, Long jobId) {
+        // Check for duplicate first (before creating entity)
+        if (gameRepository.existsByAccountIdAndPgnHash(account.getId(), parsed.getPgnHash())) {
+            incrementDuplicate(jobId);
+            return;
+        }
+
         Game game = new Game();
         game.setAccount(account);
         game.setPlayedAt(parsed.getPlayedAt());
@@ -131,13 +147,8 @@ public class IngestionService {
         game.setOpponent(parsed.getOpponent());
         game.setPgnHash(parsed.getPgnHash());
 
-        // Check for duplicate
-        if (gameRepository.existsByAccountIdAndPgnHash(account.getId(), parsed.getPgnHash())) {
-            incrementDuplicate(jobId);
-        } else {
-            gameRepository.save(game);
-            incrementProcessed(jobId);
-        }
+        gameRepository.save(game);
+        incrementProcessed(jobId);
     }
 
     /**

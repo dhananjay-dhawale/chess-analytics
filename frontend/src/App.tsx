@@ -1,7 +1,6 @@
 import { useState, useCallback } from 'react';
 import { AccountManager } from './components/AccountManager';
 import { UploadForm } from './components/UploadForm';
-import { JobProgress } from './components/JobProgress';
 import { StatsPanel } from './components/StatsPanel';
 import { MultiYearCalendar } from './components/MultiYearCalendar';
 import './App.css';
@@ -51,7 +50,8 @@ function App() {
           onSelectionChange={handleSelectionChange}
           onAccountsChange={handleAccountsChange}
           onImportStarted={handleUploadStarted}
-          importDisabled={isUploading}
+          activeJob={activeJob}
+          onJobComplete={handleJobComplete}
         />
 
         {hasAccounts && (
@@ -62,18 +62,7 @@ function App() {
           />
         )}
 
-        {activeJob && (
-          <section className="card">
-            <h2>Processing</h2>
-            <JobProgress
-              accountId={activeJob.accountId}
-              jobId={activeJob.jobId}
-              onComplete={handleJobComplete}
-            />
-          </section>
-        )}
-
-        {hasAccounts && !isUploading && (
+        {hasAccounts && (
           <>
             <StatsPanel
               accountIds={selectedAccountIds}
