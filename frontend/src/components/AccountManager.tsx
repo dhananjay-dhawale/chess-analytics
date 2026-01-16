@@ -32,6 +32,7 @@ export function AccountManager({
   const [showImportConfirm, setShowImportConfirm] = useState<Account | null>(null);
   const [jobStatus, setJobStatus] = useState<UploadJob | null>(null);
   const pollingRef = useRef<number | null>(null);
+  const initialSelectionDone = useRef(false);
 
   const fetchAccounts = useCallback(async () => {
     try {
@@ -39,21 +40,24 @@ export function AccountManager({
       setError(null);
       const data = await getAccounts();
       setAccounts(data);
-
-      // If no selection yet and we have accounts, select all
-      if (selectedAccountIds.length === 0 && data.length > 0) {
-        onSelectionChange(data.map(a => a.id));
-      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load accounts');
     } finally {
       setLoading(false);
     }
-  }, [selectedAccountIds.length, onSelectionChange]);
+  }, []);
 
   useEffect(() => {
     fetchAccounts();
   }, [fetchAccounts]);
+
+  // Auto-select all accounts on initial load only
+  useEffect(() => {
+    if (!initialSelectionDone.current && accounts.length > 0 && selectedAccountIds.length === 0) {
+      onSelectionChange(accounts.map(a => a.id));
+      initialSelectionDone.current = true;
+    }
+  }, [accounts, selectedAccountIds.length, onSelectionChange]);
 
   // Poll job status when there's an active job
   useEffect(() => {
