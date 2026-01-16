@@ -1149,3 +1149,283 @@ body {
 .button.secondary:hover {
   border-color: var(--color-text-muted);
 }
+
+/* ============================================================================
+   Mobile Responsive Styles
+   ============================================================================ */
+
+@media (max-width: 600px) {
+  /* Header */
+  .app-header {
+    padding: 1.25rem 1rem;
+  }
+
+  .app-header h1 {
+    font-size: 1.5rem;
+  }
+
+  .app-header p {
+    font-size: 0.875rem;
+  }
+
+  /* Main content */
+  .app-main {
+    padding: 1rem;
+    gap: 1rem;
+  }
+
+  .card {
+    padding: 1rem;
+  }
+
+  .card h2 {
+    font-size: 1.1rem;
+  }
+
+  /* Account Manager */
+  .account-manager-header {
+    flex-direction: column;
+    gap: 0.75rem;
+    align-items: stretch;
+  }
+
+  .account-manager-header h2 {
+    text-align: center;
+  }
+
+  .add-account-button {
+    width: 100%;
+  }
+
+  /* Account items - stack vertically on mobile */
+  .account-item {
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    padding: 0.625rem;
+  }
+
+  .account-item > .account-checkbox {
+    flex: 1 1 100%;
+    order: 1;
+  }
+
+  .account-item > .account-games,
+  .account-item > .account-sync-status {
+    order: 3;
+    margin-left: 1.75rem; /* Align with text after checkbox */
+    font-size: 0.75rem;
+  }
+
+  .account-item > .account-actions {
+    order: 2;
+    margin-left: auto;
+  }
+
+  .account-info {
+    flex-wrap: wrap;
+    gap: 0.25rem;
+  }
+
+  .account-platform {
+    font-size: 0.75rem;
+  }
+
+  .account-username {
+    font-size: 0.9rem;
+  }
+
+  .account-label {
+    font-size: 0.75rem;
+  }
+
+  /* Account selection summary */
+  .account-selection-summary {
+    flex-direction: column;
+    gap: 0.5rem;
+    align-items: flex-start;
+    font-size: 0.75rem;
+  }
+
+  .selection-buttons {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  /* Upload form */
+  .file-input-wrapper {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.5rem;
+  }
+
+  .file-button {
+    width: 100%;
+    text-align: center;
+  }
+
+  .file-name {
+    text-align: center;
+  }
+
+  /* Stats panel */
+  .stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.5rem;
+  }
+
+  .stat-item {
+    padding: 0.75rem 0.5rem;
+  }
+
+  .stat-value {
+    font-size: 1.25rem;
+  }
+
+  .stat-label {
+    font-size: 0.65rem;
+  }
+
+  /* Color stats */
+  .color-stat {
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    padding: 0.625rem;
+  }
+
+  .color-indicator {
+    min-width: 40px;
+    font-size: 0.875rem;
+  }
+
+  .color-rate {
+    font-size: 0.875rem;
+  }
+
+  .color-detail {
+    width: 100%;
+    margin-left: 0;
+    font-size: 0.75rem;
+  }
+
+  /* Account stats */
+  .account-stat {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.5rem;
+    padding: 0.625rem;
+  }
+
+  .account-stat-name {
+    min-width: 100%;
+  }
+
+  /* Calendar */
+  .calendar-header {
+    flex-direction: column;
+    gap: 0.75rem;
+    align-items: stretch;
+  }
+
+  .calendar-summary {
+    flex-direction: column;
+    gap: 0.25rem;
+    font-size: 0.75rem;
+  }
+
+  .year-header {
+    flex-direction: column;
+    gap: 0.25rem;
+    align-items: flex-start;
+  }
+
+  .year-label {
+    font-size: 1rem;
+  }
+
+  .year-stats {
+    font-size: 0.75rem;
+  }
+
+  .year-stats-detail {
+    display: none; /* Hide detailed W/L/D on mobile */
+  }
+
+  .heatmap-legend {
+    font-size: 0.65rem;
+  }
+
+  /* Share menu */
+  .share-container {
+    width: 100%;
+  }
+
+  .share-button {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .share-menu {
+    left: 0;
+    right: 0;
+    min-width: auto;
+  }
+
+  /* Modals */
+  .modal {
+    width: 95%;
+    max-height: 85vh;
+  }
+
+  .modal-header {
+    padding: 0.875rem 1rem;
+  }
+
+  .modal-header h2 {
+    font-size: 1.1rem;
+  }
+
+  .modal-form {
+    padding: 1rem;
+  }
+
+  .modal-actions {
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .modal-actions button {
+    width: 100%;
+  }
+
+  .import-confirm-modal {
+    padding: 1rem;
+  }
+
+  .import-confirm-modal h3 {
+    font-size: 1.1rem;
+  }
+
+  .import-account-name {
+    font-size: 1rem;
+  }
+
+  .import-warning {
+    padding: 0.75rem;
+    margin-bottom: 1rem;
+  }
+
+  .import-warning ul {
+    font-size: 0.75rem;
+  }
+
+  /* Tooltip - hide on mobile, use tap instead */
+  .calendar-tooltip {
+    display: none;
+  }
+
+  /* Footer */
+  .app-footer {
+    padding: 1rem;
+    font-size: 0.75rem;
+  }
+}

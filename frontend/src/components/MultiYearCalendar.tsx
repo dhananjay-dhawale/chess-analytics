@@ -119,8 +119,33 @@ export function MultiYearCalendar({ accountIds, refreshKey }: MultiYearCalendarP
 
   const handleDownload = useCallback(async () => {
     const blob = await captureScreenshot();
-    if (!blob) return;
+    if (!blob) {
+      alert('Failed to create image. Please try again.');
+      return;
+    }
 
+    // For mobile, try using share API first if available
+    if (navigator.share && navigator.canShare) {
+      try {
+        const file = new File([blob], `chess-activity-${new Date().toISOString().split('T')[0]}.png`, { type: 'image/png' });
+        if (navigator.canShare({ files: [file] })) {
+          await navigator.share({
+            files: [file],
+            title: 'My Chess Activity',
+            text: `${data?.summary.totalGames.toLocaleString()} games played!`,
+          });
+          setShowShareMenu(false);
+          return;
+        }
+      } catch (err) {
+        // User cancelled or share failed, fall through to download
+        if ((err as Error).name !== 'AbortError') {
+          console.log('Share API failed, falling back to download');
+        }
+      }
+    }
+
+    // Fallback: direct download
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
@@ -130,35 +155,41 @@ export function MultiYearCalendar({ accountIds, refreshKey }: MultiYearCalendarP
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
     setShowShareMenu(false);
-  }, [captureScreenshot]);
+  }, [captureScreenshot, data]);
 
   const handleCopyToClipboard = useCallback(async () => {
     const blob = await captureScreenshot();
-    if (!blob) return;
+    if (!blob) {
+      alert('Failed to create image. Please try again.');
+      return;
+    }
 
     try {
-      await navigator.clipboard.write([
-        new ClipboardItem({ 'image/png': blob })
-      ]);
-      alert('Image copied to clipboard!');
+      // Check if clipboard API is available and supports images
+      if (navigator.clipboard && typeof ClipboardItem !== 'undefined') {
+        await navigator.clipboard.write([
+          new ClipboardItem({ 'image/png': blob })
+        ]);
+        alert('Image copied to clipboard!');
+      } else {
+        // Mobile fallback: use share or download
+        alert('Clipboard not supported on this device. Use Download instead.');
+      }
     } catch (err) {
-      // Fallback: download if clipboard fails
       console.error('Clipboard write failed:', err);
-      handleDownload();
+      alert('Could not copy to clipboard. Use Download instead.');
     }
     setShowShareMenu(false);
-  }, [captureScreenshot, handleDownload]);
+  }, [captureScreenshot]);
 
   const handleShareTwitter = useCallback(async () => {
-    // Twitter doesn't support direct image upload via URL
-    // Copy image first, then open Twitter with pre-filled text
-    await handleCopyToClipboard();
+    // Download the image first, then open Twitter
+    await handleDownload();
     const text = encodeURIComponent(
       `My chess activity: ${data?.summary.totalGames.toLocaleString()} games played! #chess #chesscom #lichess`
     );
     window.open(`https://twitter.com/intent/tweet?text=${text}`, '_blank');
-    setShowShareMenu(false);
-  }, [data, handleCopyToClipboard]);
+  }, [data, handleDownload]);
 
   if (loading) {
     return (
