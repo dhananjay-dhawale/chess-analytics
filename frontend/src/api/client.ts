@@ -9,7 +9,8 @@ import type {
   AccountErrorResponse
 } from '../types';
 
-const API_BASE = '/api';
+const API_BASE = import.meta.env.VITE_API_BASE ?? '/api';
+
 
 /**
  * Custom error class for account-related errors with detailed info.
