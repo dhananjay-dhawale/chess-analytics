@@ -14,6 +14,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.io.BufferedReader;
@@ -27,36 +28,22 @@ import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Fetches games from Lichess public API and imports them.
- *
- * Lichess API Rate Limit Compliance:
- * - Sequential requests only (one at a time)
- * - On 429: wait a full minute before resuming
- * - Uses streaming endpoint for efficient memory usage
- * - No authentication required for public game exports
- *
- * API Endpoint Used:
- * - GET /api/games/user/{username} - Streams all games in PGN format
- *
- * Reference: https://lichess.org/page/api-tips
- *            https://lichess.org/api#tag/Games/operation/apiGamesUser
  */
 @Service
 public class LichessApiService {
 
     private static final Logger log = LoggerFactory.getLogger(LichessApiService.class);
 
-    // API Configuration
     private static final String LICHESS_API_BASE = "https://lichess.org/api/games/user/";
-    private static final String USER_AGENT = "ChessAnalytics/1.0 (personal project; contact: github.com/chess-analytics)";
-    private static final Duration REQUEST_TIMEOUT = Duration.ofMinutes(10); // Long timeout for streaming
-
-    // Rate Limiting Configuration
-    // Lichess recommends waiting a full minute on 429
+    private static final String USER_AGENT = "ChessAnalytics/1.0 (personal project)";
+    private static final Duration REQUEST_TIMEOUT = Duration.ofMinutes(10);
     private static final long BACKOFF_ON_429_MS = 60000;
     private static final int MAX_RETRIES = 3;
+    private static final int PROGRESS_UPDATE_INTERVAL = 100;
 
     private final HttpClient httpClient;
     private final PgnParser pgnParser;
@@ -64,7 +51,6 @@ public class LichessApiService {
     private final UploadJobRepository uploadJobRepository;
     private final AccountRepository accountRepository;
 
-    // Self-injection for @Async to work (Spring proxy requirement)
     @Autowired
     @Lazy
     private LichessApiService self;
@@ -83,34 +69,21 @@ public class LichessApiService {
         this.accountRepository = accountRepository;
     }
 
-    /**
-     * Starts an async import job for a Lichess account.
-     * Fetches all games via streaming API.
-     *
-     * @param account Must be a Lichess account
-     * @return The created job for progress tracking
-     * @throws IllegalArgumentException if account is not Lichess
-     */
     @Transactional
     public UploadJob startImport(Account account) {
         if (account.getPlatform() != Platform.LICHESS) {
             throw new IllegalArgumentException("Account must be Lichess platform");
         }
 
-        // Create job record
         UploadJob job = new UploadJob(account, "Lichess API Import");
         job.setStatus(JobStatus.PENDING);
         job = uploadJobRepository.save(job);
 
-        // Start async processing (use self-injection so @Async works through Spring proxy)
         self.importGamesAsync(job.getId(), account);
 
         return job;
     }
 
-    /**
-     * Checks if an import is already running for this account.
-     */
     @Transactional(readOnly = true)
     public boolean hasActiveImport(Long accountId) {
         return uploadJobRepository.existsByAccountIdAndStatusIn(
@@ -119,37 +92,27 @@ public class LichessApiService {
         );
     }
 
-    /**
-     * Async method that fetches games from Lichess API.
-     * Uses streaming to process games one at a time for memory efficiency.
-     * Supports incremental sync using the 'since' parameter.
-     */
     @Async
     public void importGamesAsync(Long jobId, Account account) {
         log.info("Starting Lichess API import for job {} (account: {})", jobId, account.getUsername());
         LocalDateTime syncStartTime = LocalDateTime.now();
 
         try {
-            // Update job to processing
-            updateJobStatus(jobId, JobStatus.PROCESSING);
+            self.updateJobStatus(jobId, JobStatus.PROCESSING);
 
-            // Build URL with parameters for PGN format
-            // The endpoint streams PGN games separated by blank lines
             StringBuilder urlBuilder = new StringBuilder(LICHESS_API_BASE)
                 .append(account.getUsername().toLowerCase())
                 .append("?moves=true")
                 .append("&tags=true")
-                .append("&clocks=false")  // Skip clock data for faster processing
-                .append("&evals=false")   // Skip evaluations for faster processing
-                .append("&opening=true"); // Include opening names
+                .append("&clocks=false")
+                .append("&evals=false")
+                .append("&opening=true");
 
-            // Add 'since' parameter for incremental sync
             LocalDateTime lastSyncAt = account.getLastSyncAt();
             if (lastSyncAt != null) {
-                // Lichess uses Unix timestamp in milliseconds
                 long sinceTimestamp = lastSyncAt.toInstant(ZoneOffset.UTC).toEpochMilli();
                 urlBuilder.append("&since=").append(sinceTimestamp);
-                log.info("Job {}: Incremental sync since {} (timestamp: {})", jobId, lastSyncAt, sinceTimestamp);
+                log.info("Job {}: Incremental sync since {}", jobId, lastSyncAt);
             }
 
             String url = urlBuilder.toString();
@@ -157,20 +120,15 @@ public class LichessApiService {
 
             int gamesProcessed = fetchAndProcessGames(url, account, jobId);
 
-            // Mark completed and update lastSyncAt
-            markJobCompleted(jobId, account.getId(), syncStartTime);
+            self.markJobCompleted(jobId, account.getId(), syncStartTime);
             log.info("Job {} completed: {} games processed", jobId, gamesProcessed);
 
         } catch (Exception e) {
             log.error("Job {} failed: {}", jobId, e.getMessage(), e);
-            markJobFailed(jobId, e.getMessage());
+            self.markJobFailed(jobId, e.getMessage());
         }
     }
 
-    /**
-     * Fetches games from Lichess and processes them as a stream.
-     * Lichess streams PGN games separated by empty lines.
-     */
     private int fetchAndProcessGames(String url, Account account, Long jobId) throws Exception {
         int attempt = 0;
 
@@ -194,7 +152,6 @@ public class LichessApiService {
                 if (statusCode == 200) {
                     return processStreamingResponse(response.body(), account, jobId);
                 } else if (statusCode == 429) {
-                    // Rate limited - wait a full minute as recommended by Lichess
                     attempt++;
                     if (attempt >= MAX_RETRIES) {
                         throw new RuntimeException("Rate limited by Lichess after " + MAX_RETRIES + " retries");
@@ -217,13 +174,12 @@ public class LichessApiService {
         throw new RuntimeException("Failed to fetch after " + MAX_RETRIES + " attempts");
     }
 
-    /**
-     * Processes streaming PGN response from Lichess.
-     * Games are separated by empty lines in the PGN format.
-     */
     private int processStreamingResponse(java.io.InputStream inputStream, Account account, Long jobId)
             throws Exception {
-        int gamesProcessed = 0;
+        AtomicInteger processedCount = new AtomicInteger(0);
+        AtomicInteger duplicateCount = new AtomicInteger(0);
+        AtomicInteger pendingUpdates = new AtomicInteger(0);
+
         StringBuilder currentPgn = new StringBuilder();
         boolean inMoves = false;
 
@@ -233,25 +189,8 @@ public class LichessApiService {
             String line;
             while ((line = reader.readLine()) != null) {
                 if (line.isEmpty()) {
-                    // Empty line could mean end of headers or end of game
                     if (inMoves && currentPgn.length() > 0) {
-                        // End of a complete game - process it
-                        String pgnString = currentPgn.toString();
-                        try {
-                            ParsedGame parsed = pgnParser.parseGameFromPgn(pgnString, account.getUsername());
-                            if (parsed != null && parsed.isValid()) {
-                                ingestionService.saveGame(account, parsed, jobId);
-                                gamesProcessed++;
-
-                                // Update total count periodically
-                                if (gamesProcessed % 100 == 0) {
-                                    updateJobTotal(jobId, gamesProcessed);
-                                    log.info("Job {}: Processed {} games so far", jobId, gamesProcessed);
-                                }
-                            }
-                        } catch (Exception e) {
-                            log.debug("Failed to parse game: {}", e.getMessage());
-                        }
+                        processGame(currentPgn.toString(), account, jobId, processedCount, duplicateCount, pendingUpdates);
                         currentPgn.setLength(0);
                         inMoves = false;
                     }
@@ -261,93 +200,86 @@ public class LichessApiService {
                 currentPgn.append(line).append("\n");
 
                 if (line.startsWith("[")) {
-                    // Header line - if we were in moves, this is a new game
                     if (inMoves) {
-                        // Process previous game first
                         String pgnString = currentPgn.toString();
-                        // Remove the last line we just added (it's part of the new game)
                         int lastNewline = pgnString.lastIndexOf('\n', pgnString.length() - 2);
                         if (lastNewline > 0) {
-                            String prevGame = pgnString.substring(0, lastNewline);
-                            try {
-                                ParsedGame parsed = pgnParser.parseGameFromPgn(prevGame, account.getUsername());
-                                if (parsed != null && parsed.isValid()) {
-                                    ingestionService.saveGame(account, parsed, jobId);
-                                    gamesProcessed++;
-
-                                    if (gamesProcessed % 100 == 0) {
-                                        updateJobTotal(jobId, gamesProcessed);
-                                        log.info("Job {}: Processed {} games so far", jobId, gamesProcessed);
-                                    }
-                                }
-                            } catch (Exception e) {
-                                log.debug("Failed to parse game: {}", e.getMessage());
-                            }
+                            processGame(pgnString.substring(0, lastNewline), account, jobId, processedCount, duplicateCount, pendingUpdates);
                         }
-                        // Keep only the new header
                         currentPgn.setLength(0);
                         currentPgn.append(line).append("\n");
                         inMoves = false;
                     }
                 } else {
-                    // Move line
                     inMoves = true;
                 }
             }
 
-            // Process the last game if any content remains
             if (currentPgn.length() > 0) {
-                String pgnString = currentPgn.toString();
-                try {
-                    ParsedGame parsed = pgnParser.parseGameFromPgn(pgnString, account.getUsername());
-                    if (parsed != null && parsed.isValid()) {
-                        ingestionService.saveGame(account, parsed, jobId);
-                        gamesProcessed++;
-                    }
-                } catch (Exception e) {
-                    log.debug("Failed to parse last game: {}", e.getMessage());
-                }
+                processGame(currentPgn.toString(), account, jobId, processedCount, duplicateCount, pendingUpdates);
             }
         }
 
-        // Final update of total
-        updateJobTotal(jobId, gamesProcessed);
-        return gamesProcessed;
+        // Final progress update
+        self.updateJobProgress(jobId, processedCount.get(), duplicateCount.get());
+        return processedCount.get();
     }
 
-    // Job update helper methods
+    private void processGame(String pgnString, Account account, Long jobId,
+                            AtomicInteger processedCount, AtomicInteger duplicateCount,
+                            AtomicInteger pendingUpdates) {
+        try {
+            ParsedGame parsed = pgnParser.parseGameFromPgn(pgnString, account.getUsername());
+            if (parsed != null && parsed.isValid()) {
+                boolean isDuplicate = ingestionService.saveGameOnly(account, parsed);
+                processedCount.incrementAndGet();
+                if (isDuplicate) {
+                    duplicateCount.incrementAndGet();
+                }
 
-    @Transactional
-    void updateJobStatus(Long jobId, JobStatus status) {
+                if (pendingUpdates.incrementAndGet() >= PROGRESS_UPDATE_INTERVAL) {
+                    self.updateJobProgress(jobId, processedCount.get(), duplicateCount.get());
+                    pendingUpdates.set(0);
+                    log.info("Job {}: Processed {} games so far", jobId, processedCount.get());
+                }
+            }
+        } catch (Exception e) {
+            log.debug("Failed to parse game: {}", e.getMessage());
+        }
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void updateJobStatus(Long jobId, JobStatus status) {
         uploadJobRepository.findById(jobId).ifPresent(job -> {
             job.setStatus(status);
             uploadJobRepository.save(job);
         });
     }
 
-    @Transactional
-    void updateJobTotal(Long jobId, int totalGames) {
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void updateJobProgress(Long jobId, int processed, int duplicates) {
         uploadJobRepository.findById(jobId).ifPresent(job -> {
-            job.setTotalGames(totalGames);
+            job.setTotalGames(processed); // For streaming, total = processed
+            job.setProcessedGames(processed);
+            job.setDuplicateGames(duplicates);
             uploadJobRepository.save(job);
         });
     }
 
-    @Transactional
-    void markJobCompleted(Long jobId, Long accountId, LocalDateTime syncTime) {
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void markJobCompleted(Long jobId, Long accountId, LocalDateTime syncTime) {
         uploadJobRepository.findById(jobId).ifPresent(job -> {
             job.markCompleted();
             uploadJobRepository.save(job);
         });
-        // Update account's lastSyncAt
         accountRepository.findById(accountId).ifPresent(account -> {
             account.setLastSyncAt(syncTime);
             accountRepository.save(account);
         });
     }
 
-    @Transactional
-    void markJobFailed(Long jobId, String errorMessage) {
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void markJobFailed(Long jobId, String errorMessage) {
         uploadJobRepository.findById(jobId).ifPresent(job -> {
             job.markFailed(errorMessage);
             uploadJobRepository.save(job);

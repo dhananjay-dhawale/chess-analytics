@@ -24,6 +24,7 @@ import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Handles PGN file uploads and asynchronous game parsing.
@@ -33,6 +34,7 @@ import java.util.UUID;
 public class IngestionService {
 
     private static final Logger log = LoggerFactory.getLogger(IngestionService.class);
+    private static final int PROGRESS_UPDATE_INTERVAL = 50; // Update DB every N games
 
     private final PgnParser pgnParser;
     private final GameRepository gameRepository;
@@ -71,7 +73,7 @@ public class IngestionService {
     public UploadJobResponse uploadPgn(Account account, MultipartFile file) throws IOException {
         // Save file with unique name
         String originalFilename = file.getOriginalFilename();
-        String storedFilename = UUID.randomUUID() + "_" + 
+        String storedFilename = UUID.randomUUID() + "_" +
             (originalFilename != null ? originalFilename : "upload.pgn");
         Path filePath = uploadDir.resolve(storedFilename);
 
@@ -97,42 +99,62 @@ public class IngestionService {
     public void processFileAsync(Long jobId, Account account, Path filePath) {
         log.info("Starting async processing for job {} (account: {})", jobId, account.getUsername());
 
+        // Track progress in memory, batch updates to DB
+        AtomicInteger processedCount = new AtomicInteger(0);
+        AtomicInteger duplicateCount = new AtomicInteger(0);
+        AtomicInteger pendingUpdates = new AtomicInteger(0);
+
         try {
             // Count total games first for progress tracking
             int totalGames = pgnParser.countGames(filePath);
-            updateJobTotal(jobId, totalGames);
+            self.updateJobTotal(jobId, totalGames);
             log.info("Job {}: Found {} games to process", jobId, totalGames);
 
-            // Parse and save games (use self for @Transactional to work through proxy)
+            // Parse and save games
             pgnParser.parse(filePath, account.getUsername(), parsedGame -> {
                 try {
-                    self.saveGame(account, parsedGame, jobId);
+                    boolean isDuplicate = self.saveGameOnly(account, parsedGame);
+
+                    processedCount.incrementAndGet();
+                    if (isDuplicate) {
+                        duplicateCount.incrementAndGet();
+                    }
+
+                    // Batch progress updates to reduce DB contention
+                    if (pendingUpdates.incrementAndGet() >= PROGRESS_UPDATE_INTERVAL) {
+                        int processed = processedCount.get();
+                        int duplicates = duplicateCount.get();
+                        self.updateJobProgress(jobId, processed, duplicates);
+                        pendingUpdates.set(0);
+                    }
                 } catch (Exception e) {
                     log.error("Error saving game in job {}: {}", jobId, e.getMessage());
+                    processedCount.incrementAndGet();
+                    pendingUpdates.incrementAndGet();
                 }
             });
 
-            // Mark completed
-            markJobCompleted(jobId);
-            log.info("Job {} completed successfully", jobId);
+            // Final progress update and mark completed
+            self.updateJobProgress(jobId, processedCount.get(), duplicateCount.get());
+            self.markJobCompleted(jobId);
+            log.info("Job {} completed successfully: {} processed, {} duplicates",
+                jobId, processedCount.get(), duplicateCount.get());
 
         } catch (Exception e) {
             log.error("Job {} failed: {}", jobId, e.getMessage(), e);
-            markJobFailed(jobId, e.getMessage());
+            self.markJobFailed(jobId, e.getMessage());
         }
     }
 
     /**
-     * Saves a parsed game and updates job progress.
-     * Uses REQUIRES_NEW to ensure each game save is in its own transaction,
-     * preventing session corruption if one save fails.
+     * Saves a parsed game without updating job progress.
+     * Returns true if the game was a duplicate.
      */
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public void saveGame(Account account, ParsedGame parsed, Long jobId) {
+    public boolean saveGameOnly(Account account, ParsedGame parsed) {
         // Check for duplicate first (before creating entity)
         if (gameRepository.existsByAccountIdAndPgnHash(account.getId(), parsed.getPgnHash())) {
-            incrementDuplicate(jobId);
-            return;
+            return true; // duplicate
         }
 
         Game game = new Game();
@@ -148,7 +170,7 @@ public class IngestionService {
         game.setPgnHash(parsed.getPgnHash());
 
         gameRepository.save(game);
-        incrementProcessed(jobId);
+        return false; // not a duplicate
     }
 
     /**
@@ -162,7 +184,7 @@ public class IngestionService {
 
     // Job update methods
 
-    @Transactional
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void updateJobTotal(Long jobId, int totalGames) {
         uploadJobRepository.findById(jobId).ifPresent(job -> {
             job.setTotalGames(totalGames);
@@ -171,24 +193,16 @@ public class IngestionService {
         });
     }
 
-    @Transactional
-    public void incrementProcessed(Long jobId) {
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void updateJobProgress(Long jobId, int processed, int duplicates) {
         uploadJobRepository.findById(jobId).ifPresent(job -> {
-            job.incrementProcessed();
+            job.setProcessedGames(processed);
+            job.setDuplicateGames(duplicates);
             uploadJobRepository.save(job);
         });
     }
 
-    @Transactional
-    public void incrementDuplicate(Long jobId) {
-        uploadJobRepository.findById(jobId).ifPresent(job -> {
-            job.incrementProcessed(); // Still counts toward progress
-            job.incrementDuplicate();
-            uploadJobRepository.save(job);
-        });
-    }
-
-    @Transactional
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void markJobCompleted(Long jobId) {
         uploadJobRepository.findById(jobId).ifPresent(job -> {
             job.markCompleted();
@@ -196,7 +210,7 @@ public class IngestionService {
         });
     }
 
-    @Transactional
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void markJobFailed(Long jobId, String errorMessage) {
         uploadJobRepository.findById(jobId).ifPresent(job -> {
             job.markFailed(errorMessage);
