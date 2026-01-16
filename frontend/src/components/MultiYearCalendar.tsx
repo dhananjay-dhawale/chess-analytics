@@ -1,6 +1,7 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import CalendarHeatmapLib from 'react-calendar-heatmap';
 import 'react-calendar-heatmap/dist/styles.css';
+import html2canvas from 'html2canvas';
 import type { CalendarResponse, CalendarDayResponse, CalendarDayAccountBreakdown } from '../types';
 import { getMultiYearCalendarData } from '../api/client';
 
@@ -20,6 +21,9 @@ export function MultiYearCalendar({ accountIds, refreshKey }: MultiYearCalendarP
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [tooltip, setTooltip] = useState<TooltipData | null>(null);
+  const [isCapturing, setIsCapturing] = useState(false);
+  const [showShareMenu, setShowShareMenu] = useState(false);
+  const calendarRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let isActive = true;
@@ -86,6 +90,76 @@ export function MultiYearCalendar({ accountIds, refreshKey }: MultiYearCalendarP
     setTooltip(null);
   }, []);
 
+  const captureScreenshot = useCallback(async (): Promise<Blob | null> => {
+    if (!calendarRef.current) return null;
+
+    setIsCapturing(true);
+    setTooltip(null); // Hide tooltip during capture
+
+    try {
+      const canvas = await html2canvas(calendarRef.current, {
+        backgroundColor: '#0d1117', // Match app background
+        scale: 2, // Higher resolution for social media
+        logging: false,
+        useCORS: true,
+      });
+
+      return new Promise((resolve) => {
+        canvas.toBlob((blob) => {
+          resolve(blob);
+        }, 'image/png', 1.0);
+      });
+    } catch (err) {
+      console.error('Failed to capture screenshot:', err);
+      return null;
+    } finally {
+      setIsCapturing(false);
+    }
+  }, []);
+
+  const handleDownload = useCallback(async () => {
+    const blob = await captureScreenshot();
+    if (!blob) return;
+
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `chess-activity-${new Date().toISOString().split('T')[0]}.png`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    setShowShareMenu(false);
+  }, [captureScreenshot]);
+
+  const handleCopyToClipboard = useCallback(async () => {
+    const blob = await captureScreenshot();
+    if (!blob) return;
+
+    try {
+      await navigator.clipboard.write([
+        new ClipboardItem({ 'image/png': blob })
+      ]);
+      alert('Image copied to clipboard!');
+    } catch (err) {
+      // Fallback: download if clipboard fails
+      console.error('Clipboard write failed:', err);
+      handleDownload();
+    }
+    setShowShareMenu(false);
+  }, [captureScreenshot, handleDownload]);
+
+  const handleShareTwitter = useCallback(async () => {
+    // Twitter doesn't support direct image upload via URL
+    // Copy image first, then open Twitter with pre-filled text
+    await handleCopyToClipboard();
+    const text = encodeURIComponent(
+      `My chess activity: ${data?.summary.totalGames.toLocaleString()} games played! #chess #chesscom #lichess`
+    );
+    window.open(`https://twitter.com/intent/tweet?text=${text}`, '_blank');
+    setShowShareMenu(false);
+  }, [data, handleCopyToClipboard]);
+
   if (loading) {
     return (
       <section className="card multi-year-calendar">
@@ -115,45 +189,90 @@ export function MultiYearCalendar({ accountIds, refreshKey }: MultiYearCalendarP
 
   return (
     <section className="card multi-year-calendar">
-      <h2>Activity</h2>
-
-      <div className="calendar-summary">
-        <span>
-          {data.summary.totalGames.toLocaleString()} games across{' '}
-          {data.summary.activeDays} days ({data.summary.yearRange})
-        </span>
-        {data.summary.accountCount > 1 && (
-          <span className="account-count">
-            {data.summary.accountCount} accounts combined
-          </span>
-        )}
-      </div>
-
-      <div className="years-container">
-        {data.years.map((yearData) => (
-          <YearHeatmap
-            key={yearData.year}
-            yearData={yearData}
-            getClassForValue={getClassForValue}
-            onDayHover={handleMouseOver}
-            onDayLeave={handleMouseLeave}
-          />
-        ))}
-      </div>
-
-      <div className="heatmap-legend">
-        <span>Less</span>
-        <div className="legend-scale">
-          <div className="legend-item color-empty" />
-          <div className="legend-item color-scale-1" />
-          <div className="legend-item color-scale-2" />
-          <div className="legend-item color-scale-3" />
-          <div className="legend-item color-scale-4" />
+      <div className="calendar-header">
+        <h2>Activity</h2>
+        <div className="share-container">
+          <button
+            className="share-button"
+            onClick={() => setShowShareMenu(!showShareMenu)}
+            disabled={isCapturing}
+            title="Share your activity"
+          >
+            {isCapturing ? '...' : '📤'}
+          </button>
+          {showShareMenu && (
+            <div className="share-menu">
+              <button onClick={handleDownload}>
+                💾 Download PNG
+              </button>
+              <button onClick={handleCopyToClipboard}>
+                📋 Copy to Clipboard
+              </button>
+              <button onClick={handleShareTwitter}>
+                🐦 Share on Twitter
+              </button>
+            </div>
+          )}
         </div>
-        <span>More</span>
+      </div>
+
+      {/* Capturable content */}
+      <div ref={calendarRef} className="calendar-capture-area">
+        <div className="calendar-branding">
+          <span className="brand-title">Chess Analytics</span>
+          <span className="brand-stats">
+            {data.summary.totalGames.toLocaleString()} games across{' '}
+            {data.summary.activeDays} days
+          </span>
+        </div>
+
+        <div className="calendar-summary">
+          <span>
+            {data.summary.totalGames.toLocaleString()} games across{' '}
+            {data.summary.activeDays} days ({data.summary.yearRange})
+          </span>
+          {data.summary.accountCount > 1 && (
+            <span className="account-count">
+              {data.summary.accountCount} accounts combined
+            </span>
+          )}
+        </div>
+
+        <div className="years-container">
+          {data.years.map((yearData) => (
+            <YearHeatmap
+              key={yearData.year}
+              yearData={yearData}
+              getClassForValue={getClassForValue}
+              onDayHover={handleMouseOver}
+              onDayLeave={handleMouseLeave}
+            />
+          ))}
+        </div>
+
+        <div className="heatmap-legend">
+          <span>Less</span>
+          <div className="legend-scale">
+            <div className="legend-item color-empty" />
+            <div className="legend-item color-scale-1" />
+            <div className="legend-item color-scale-2" />
+            <div className="legend-item color-scale-3" />
+            <div className="legend-item color-scale-4" />
+          </div>
+          <span>More</span>
+        </div>
+
+        <div className="calendar-watermark">
+          chessanalytics.app
+        </div>
       </div>
 
       {tooltip && <CalendarTooltip tooltip={tooltip} />}
+
+      {/* Click outside to close share menu */}
+      {showShareMenu && (
+        <div className="share-menu-backdrop" onClick={() => setShowShareMenu(false)} />
+      )}
     </section>
   );
 }
