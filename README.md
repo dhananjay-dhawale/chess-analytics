@@ -10,6 +10,20 @@ Personal chess analytics web application for analyzing PGN files from Chess.com,
 - Win/loss/draw statistics
 - Filter by time control, color, account
 
+## Screenshots
+
+### Account Management & Upload
+![Accounts](images/accounts.png)
+
+### Statistics Dashboard
+![Statistics](images/statistics.png)
+
+### Activity Heatmap
+![Activity Heatmap](images/activity_heatmap.png)
+
+### Calendar Heatmap
+![Calendar Heatmap](images/dhananjay_calendar_heatmap.png)
+
 ## Tech Stack
 
 **Backend:**
